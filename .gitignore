@@ -8,6 +8,7 @@ wheels/
 out/
 **/old/
 results/
+.DS_Store
 
 # Virtual environments
 .venv
