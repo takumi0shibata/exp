@@ -34,6 +34,24 @@ from utils.gpt_api import LLMRunner
 from utils.gemma_api import GemmaRunner
 
 
+_JSON_FENCE_RE = re.compile(
+    r"```[ \t]*json[ \t]*\r?\n"   # 開始フェンス（言語指定：json）
+    r"(.*?)"                      # 中身（最短一致）
+    r"\r?\n?[ \t]*```",           # 終了フェンス
+    re.IGNORECASE | re.DOTALL
+)
+
+def unwrap_json_codeblock(s: str) -> str:
+    """
+    文字列 s に含まれる最初の ```json ... ``` コードブロックを
+    中身だけに置き換えて返す。見つからなければ s を返す。
+    """
+    m = _JSON_FENCE_RE.search(s)
+    if not m:
+        return s
+    inner = m.group(1)
+    return inner
+
 # ---------------------------------------------------------------------------
 # Logging setup
 # ---------------------------------------------------------------------------
@@ -228,7 +246,7 @@ def postprocess_to_csv(
             text = entry.get("text", "")
 
             try:
-                output = json.loads(text)
+                output = json.loads(unwrap_json_codeblock(text))
                 preference = output.get("preference")
             except json.JSONDecodeError:
                 # Model did not return JSON; mark as undecided (0.5)
@@ -343,8 +361,8 @@ def main(args: argparse.Namespace) -> None:
             user_prompt=user_prompt,
             essay_topic=essay_topic,
             rubric=rubric,
-            essay1=df.filter(pl.col("essay_id") == id_1)["essay"].item(),
-            essay2=df.filter(pl.col("essay_id") == id_2)["essay"].item(),
+            essay1=df.filter(pl.col("essay_id") == id_1)["essay"][0],
+            essay2=df.filter(pl.col("essay_id") == id_2)["essay"][0],
             llm_name=args.model,
         )
     logger.info("Built %d query pairs", len(queries))
@@ -371,7 +389,12 @@ def main(args: argparse.Namespace) -> None:
             base_sleep=args.base_sleep,
         )
     elif 'gemma-3n' in args.model:
-        runner = GemmaRunner(jsonl_path=JSONL_PATH, model_id=args.model, max_new_tokens=512)
+        runner = GemmaRunner(
+            jsonl_path=JSONL_PATH,
+            model_id=args.model,
+            max_new_tokens=args.gemma_max_new_tokens,
+            batch_size=args.gemma_batch_size,
+        )
     logger.info("Dispatching %d LLM calls (batched)", len(queries))
     runner.run_all(queries)
     logger.info("LLM calls completed; results at %s", JSONL_PATH)
@@ -385,7 +408,7 @@ def main(args: argparse.Namespace) -> None:
         queries=queries,
         num_pairs=NUM_PAIRS,
         sample_dir=args.sample_dir,
-        model=args.model,
+        model=args.model.split('/')[-1],
         seed=args.seed,
     )
 
@@ -410,9 +433,15 @@ if __name__ == "__main__":
         ],
         help="LLM model identifier for annotation"
     )
+
+    # GPT settings
     p.add_argument("--max-workers", type=int, default=20, help="Maximum parallel LLM calls")
     p.add_argument("--max-retries", type=int, default=6, help="Maximum retries per LLM call")
     p.add_argument("--base-sleep", type=float, default=1.0, help="Base sleep time (seconds) between retries")
+
+    # Gemma settings
+    p.add_argument("--gemma-batch-size", type=int, default=10, help="Batch size for Gemma LLM calls")
+    p.add_argument("--gemma-max-new-tokens", type=int, default=512, help="Max new tokens for Gemma generation")
 
     # Directories
     p.add_argument("--llm-prompts-dir", type=Path, default=Path("./llm_prompts"), help="Directory containing prompt templates and rubrics")

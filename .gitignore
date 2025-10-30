@@ -10,6 +10,7 @@ out/
 results/
 .DS_Store
 out_vanilla/
+log/
 
 # Virtual environments
 .venv
