@@ -11,5 +11,5 @@ uv sync
 ```
 
 ```bash
-TQDM_DISABLE=1 nohup bash src/01_annotation.sh > logs/annotation.log 2>&1 &
+TQDM_DISABLE=1 nohup bash src/run_annotation.sh > log/annotation.log 2>&1 &
 ```

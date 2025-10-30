@@ -17,14 +17,14 @@ GEMMA_MAX_NEW_TOKENS=512
 
 for seed in 12
 do
-  for p in {1..8}
+  for p in {1..7}
   do
     ATTS=$(python -c 'from src.utils.helper import target_attribute as t; import sys; print(" ".join(t(int(sys.argv[1]))))' "$p")
     for att in $ATTS;
     do
       echo "running: prompt=$p att=$att"
       python src/01_annotation.py \
-        --prompt $p \
+        --target-prompt $p \
         --target-att $att \
         --num-pairs $NUM_PAIRS \
         --seed $seed \
