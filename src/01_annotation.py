@@ -20,7 +20,7 @@ import re
 import json
 import argparse
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Tuple, Literal
 import random
 from itertools import combinations
 import logging
@@ -31,6 +31,7 @@ from dotenv import load_dotenv
 
 from utils.helper import load_asap, set_seed
 from utils.gpt_api import LLMRunner
+from utils.gemma_api import GemmaRunner
 
 
 # ---------------------------------------------------------------------------
@@ -93,26 +94,7 @@ def draw_from_all_unique_pairs(
     k: Optional[int] = None,
     seed: int = 12,
 ) -> List[Tuple[Any, Any]]:
-    """Return a shuffled list of unique unordered pairs (combinations) from *xs*.
-
-    The function enumerates all 2-combinations of the input, shuffles them with a
-    deterministic RNG seeded by *seed*, and returns the first *k* pairs if provided.
-    If *k* is ``None``, all pairs (in randomized order) are returned.
-
-    Parameters
-    ----------
-    xs
-        Iterable of items to be paired.
-    k
-        Optional number of pairs to return after shuffling. ``None`` => return all.
-    seed
-        Random seed used for shuffling to ensure reproducibility.
-
-    Returns
-    -------
-    list[tuple[Any, Any]]
-        Shuffled list of unique unordered pairs.
-    """
+    """Return a shuffled list of unique unordered pairs (combinations) from *xs*."""
     xs = list(xs)
     all_pairs = list(combinations(xs, 2))
     rnd = random.Random(seed)
@@ -122,29 +104,7 @@ def draw_from_all_unique_pairs(
 
 
 def find_rubric_path(rubric_dir: Path, target_prompt: int) -> Path:
-    """Find the rubric Markdown file in *rubric_dir* matching *target_prompt*.
-
-    The search scans filenames ending with ``.md`` and selects the first whose
-    digit substrings contain ``target_prompt``. If not found, a meaningful
-    :class:`FileNotFoundError` is raised instead of propagating ``StopIteration``.
-
-    Parameters
-    ----------
-    rubric_dir
-        Directory that contains rubric ``.md`` files.
-    target_prompt
-        Prompt ID used to filter the rubric file based on digits in the filename.
-
-    Returns
-    -------
-    Path
-        Resolved path to the rubric Markdown file.
-
-    Raises
-    ------
-    FileNotFoundError
-        If a matching rubric file is not found in *rubric_dir*.
-    """
+    """Find the rubric Markdown file in *rubric_dir* matching *target_prompt*."""
     logger.debug("Searching for rubric in %s for prompt %s", rubric_dir, target_prompt)
     try:
         rubric_filename = next(
@@ -180,6 +140,37 @@ def count_total_tokens(queries: Queries, model: str = "gpt-4o-mini") -> int:
             total_tokens += len(enc.encode(msg["content"]))
     logger.info("Estimated total tokens for %s: %d", model, total_tokens)
     return total_tokens
+
+
+def create_messages(
+    system_prompt: str,
+    user_prompt: str,
+    essay_topic: str,
+    rubric: str,
+    essay1: str,
+    essay2: str,
+    llm_name: str
+) -> List[ChatMessage]:
+    """Construct chat messages for a single essay pair."""
+    user_content = (
+        user_prompt
+        .replace("{prompt}", essay_topic)
+        .replace("{rubric}", rubric)
+        .replace("{essay1}", essay1)
+        .replace("{essay2}", essay2)
+    )
+    if 'gemma-3n' in llm_name.lower():
+        return [
+            {"role": "system", "content": [{"type": "text", "text": system_prompt}]},
+            {"role": "user", "content": [{"type": "text", "text": user_content}]},
+        ]
+    elif 'gpt-5' in llm_name.lower():
+        return [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_content},
+        ]
+    else:
+        raise ValueError(f"Unsupported LLM name for message creation: {llm_name}")
 
 
 def postprocess_to_csv(
@@ -298,7 +289,6 @@ def postprocess_to_csv(
 # ---------------------------------------------------------------------------
 # Program entry point
 # ---------------------------------------------------------------------------
-
 def main(args: argparse.Namespace) -> None:
     """Run the end-to-end annotation workflow.
 
@@ -348,19 +338,15 @@ def main(args: argparse.Namespace) -> None:
     # 3) Build queries: sample unique unordered essay ID pairs
     queries: Queries = {}
     for id_1, id_2 in draw_from_all_unique_pairs(df["essay_id"], k=NUM_PAIRS, seed=args.seed):
-        queries[f"{id_1}_{id_2}"] = [
-            {"role": "system", "content": system_prompt},
-            {
-                "role": "user",
-                "content": (
-                    user_prompt
-                    .replace("{prompt}", essay_topic)
-                    .replace("{rubric}", rubric)
-                    .replace("{essay1}", df.filter(pl.col("essay_id") == id_1)["essay"][0])
-                    .replace("{essay2}", df.filter(pl.col("essay_id") == id_2)["essay"][0])
-                ),
-            },
-        ]
+        queries[f"{id_1}_{id_2}"] = create_messages(
+            system_prompt=system_prompt,
+            user_prompt=user_prompt,
+            essay_topic=essay_topic,
+            rubric=rubric,
+            essay1=df.filter(pl.col("essay_id") == id_1)["essay_text"].item(),
+            essay2=df.filter(pl.col("essay_id") == id_2)["essay_text"].item(),
+            llm_name=args.model,
+        )
     logger.info("Built %d query pairs", len(queries))
 
     # 4) Token accounting (informational)
@@ -373,14 +359,17 @@ def main(args: argparse.Namespace) -> None:
     logger.debug("Output directory: %s", OUTDIR)
 
     # 6) Execute LLM calls via runner
-    runner = LLMRunner(
-        model=args.model,
-        outdir=OUTDIR,
-        jsonl_path=JSONL_PATH,
-        max_workers=args.max_workers,
-        max_retries=args.max_retries,
-        base_sleep=args.base_sleep,
-    )
+    if 'gpt-5' in args.model:
+        runner = LLMRunner(
+            model=args.model,
+            outdir=OUTDIR,
+            jsonl_path=JSONL_PATH,
+            max_workers=args.max_workers,
+            max_retries=args.max_retries,
+            base_sleep=args.base_sleep,
+        )
+    elif 'gemma-3n' in args.model:
+        runner = GemmaRunner(jsonl_path=JSONL_PATH, model_id=args.model, max_new_tokens=512)
     logger.info("Dispatching %d LLM calls (batched)", len(queries))
     runner.run_all(queries)
     logger.info("LLM calls completed; results at %s", JSONL_PATH)
