@@ -9,6 +9,7 @@ out/
 **/old/
 results/
 .DS_Store
+out_vanilla/
 
 # Virtual environments
 .venv
