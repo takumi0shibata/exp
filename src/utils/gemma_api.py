@@ -69,7 +69,7 @@ class GemmaRunner:
 
         model = Gemma3nForConditionalGeneration.from_pretrained(
             self.model_id,
-            device="cuda",
+            device_map="auto",
             torch_dtype=torch.bfloat16,
         ).eval()
         processor = AutoProcessor.from_pretrained(self.model_id)
@@ -95,7 +95,7 @@ class GemmaRunner:
                 "id": str(i),
                 "text": decoded,
                 "saved_at": int(time.time()),
-                "model": self.model,
+                "model": self.model_id,
             }
             self._dump_jsonl(record)
 

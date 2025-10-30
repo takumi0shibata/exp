@@ -343,18 +343,20 @@ def main(args: argparse.Namespace) -> None:
             user_prompt=user_prompt,
             essay_topic=essay_topic,
             rubric=rubric,
-            essay1=df.filter(pl.col("essay_id") == id_1)["essay_text"].item(),
-            essay2=df.filter(pl.col("essay_id") == id_2)["essay_text"].item(),
+            essay1=df.filter(pl.col("essay_id") == id_1)["essay"].item(),
+            essay2=df.filter(pl.col("essay_id") == id_2)["essay"].item(),
             llm_name=args.model,
         )
     logger.info("Built %d query pairs", len(queries))
 
     # 4) Token accounting (informational)
-    total = count_total_tokens(queries, model="gpt-4o-mini")
-    logger.info("Total Tokens: %s", f"{total:,}")
+    if 'gpt-5' in args.model:
+        total = count_total_tokens(queries, model="gpt-4o-mini")
+        logger.info("Total Tokens: %s", f"{total:,}")
 
     # 5) Output paths
-    OUTDIR: Path = args.out_base / args.model / str(TARGET_PROMPT) / TARGET_ATT
+    OUTDIR: Path = args.out_base / args.model.split('/')[-1] / str(TARGET_PROMPT) / TARGET_ATT
+    os.makedirs(OUTDIR, exist_ok=True)
     JSONL_PATH: Path = OUTDIR / "results.jsonl"
     logger.debug("Output directory: %s", OUTDIR)
 
@@ -398,7 +400,16 @@ if __name__ == "__main__":
     p.add_argument("--seed", type=int, default=12, help="Random seed for pair selection")
 
     # Model/API settings
-    p.add_argument("--model", type=str, default="gpt-5-mini-2025-08-07", help="LLM model identifier for annotation")
+    p.add_argument("--model", type=str,
+        default="gpt-5-mini-2025-08-07",
+        choices=[
+            "gpt-5-mini-2025-08-07",
+            "gpt-5-2025-08-07",
+            "google/gemma-3n-e2b-it",
+            "google/gemma-3n-e4b-it"
+        ],
+        help="LLM model identifier for annotation"
+    )
     p.add_argument("--max-workers", type=int, default=20, help="Maximum parallel LLM calls")
     p.add_argument("--max-retries", type=int, default=6, help="Maximum retries per LLM call")
     p.add_argument("--base-sleep", type=float, default=1.0, help="Base sleep time (seconds) between retries")
