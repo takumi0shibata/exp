@@ -6,6 +6,7 @@ import pickle
 import torch
 from torch.utils.data import DataLoader
 from typing import Optional
+import os
 
 from models.ranknet_utils import (
     SingleAttrTrainingConfig,
@@ -26,8 +27,7 @@ def main(args, training_config: SingleAttrTrainingConfig, distribution_estimatio
     # -----------------------------
     # Data Preparation
     # -----------------------------
-    # battles = pl.read_csv(f"./sample/train_{args.model}_{args.prompt}_{args.seed}_{args.attribute}_{args.num_pairs}.csv")
-    battles = pl.read_csv(f'./sample/train_{args.prompt}_{args.attribute}_narrowed.csv')
+    battles = pl.read_csv(f"./sample/train_{args.model}_{args.prompt}_{args.seed}_{args.attribute}_{args.num_pairs}.csv")
     table, overall_agreement_rate, non_tie_agreement_rate = calculate_agreement_rates(battles)
     print(f"Overall agreement rate (including ties): {overall_agreement_rate:.4f}")
     print(f"Non-tie agreement rate: {non_tie_agreement_rate:.4f}")
@@ -58,7 +58,8 @@ def main(args, training_config: SingleAttrTrainingConfig, distribution_estimatio
     )
     if training_config.eval_qwk:
         # Create eval data
-        df = load_asap(args.prompt, stratify=True)[['essay_id', args.attribute]]
+        df = load_asap(args.prompt)[['essay_id', args.attribute]]
+        df = df.drop_nulls()
         true_scores = df[args.attribute].to_numpy()  # (num_essays,)
         essay_embeddings = np.array([cached_embeddings[eid] for eid in df['essay_id']])  # (num_essays, emb_dim)
         score_range = get_min_max_scores(args.prompt, args.attribute)
@@ -82,6 +83,7 @@ def main(args, training_config: SingleAttrTrainingConfig, distribution_estimatio
     _, loss_history, metrics_history = trainer.train(dataloader)
 
     met_df = pl.DataFrame(metrics_history, orient='row')
+    os.makedirs(f'./results/main/ranknet/', exist_ok=True)
     met_df.write_csv(f'./results/main/ranknet/{args.prompt}_{args.attribute}_{args.seed}_{args.num_pairs}_{args.model}_{args.ot_calibration}.csv')
 
 

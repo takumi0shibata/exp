@@ -26,6 +26,25 @@ def pairs_equal(battles_dict: dict[str, pl.DataFrame]) -> bool:
         for k in keys[1:]
     )
 
+def reordering_pairs(battles_dict: dict[str, pl.DataFrame]) -> dict[str, pl.DataFrame]:
+    keys = list(battles_dict)
+
+    for k in keys:
+        battle = battles_dict[k].unique(subset=["essay1_id", "essay2_id"])
+        battles_dict[k] = battle
+
+    ref = battles_dict[keys[0]].select(["essay1_id", "essay2_id"])
+    for k in keys[1:]:
+        battle = battles_dict[k]
+        battle = ref.join(
+            battle,
+            on=["essay1_id", "essay2_id"],
+            how="left",
+            maintain_order='left'
+        )
+        battles_dict[k] = battle
+    return battles_dict
+
 def main(args, training_config: MultiAttrTrainingConfig, distribution_estimation_config: Optional[UnifiedConfig] = None):
     # -----------------------------
     # General Setup
@@ -37,17 +56,18 @@ def main(args, training_config: MultiAttrTrainingConfig, distribution_estimation
     # Data Preparation
     # -----------------------------
     # Load embeddings
-    emb_dir = Path(os.getenv("EMB_DIR"))
+    emb_dir = Path("./embeddings")
     embedding_path = emb_dir / 'ASAP' / args.embedding_model / 'embeddings.pkl'
     with open(embedding_path, 'rb') as f:
         cached_embeddings = pickle.load(f)
     # Load battles for all attributes
     battles_dict: dict[str, pl.DataFrame] = {}
     for attr in TARGET_ATTRIBUTES:
-        csv_path = f'./sample/train_{args.prompt}_{attr}_narrowed.csv'
+        csv_path = f"./sample/train_{args.model}_{args.prompt}_{args.seed}_{attr}_{args.num_pairs}.csv"
         battles = pl.read_csv(csv_path)
         battles_dict[attr] = battles
 
+    battles_dict = reordering_pairs(battles_dict)
     assert pairs_equal(battles_dict) , "Essay pairs do not match across attributes."
 
     # Collect labels for all attributes
@@ -105,6 +125,7 @@ def main(args, training_config: MultiAttrTrainingConfig, distribution_estimation
     _, loss_history, qwk_history = trainer.train(dataloader)
 
     met_df = pl.DataFrame(qwk_history, orient='row')
+    os.makedirs(f'./results/main/multiattr_ranknet/', exist_ok=True)
     met_df.write_csv(f'./results/main/multiattr_ranknet/{args.prompt}_{args.seed}_{args.num_pairs}_{args.model}_{args.ot_calibration}.csv')
 
 
