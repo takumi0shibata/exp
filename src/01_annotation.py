@@ -249,7 +249,7 @@ def postprocess_to_csv(
                 output = json.loads(unwrap_json_codeblock(text))
                 preference = output.get("preference")
             except json.JSONDecodeError:
-                # Model did not return JSON; mark as undecided (0.5)
+                # Model did not return JSON; mark as null
                 preference = None
                 errors += 1
 
@@ -284,7 +284,8 @@ def postprocess_to_csv(
             # Map model output string to numeric preference
             pl.when(pl.col("predicted_preference") == "essay1").then(1)
             .when(pl.col("predicted_preference") == "essay2").then(0)
-            .otherwise(0.5)
+            .when(pl.col("predicted_preference") == "tie").then(0.5)
+            .otherwise(None)
             .alias("predicted_preference"),
         )
         # Keep only rows corresponding to sampled pairs

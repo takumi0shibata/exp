@@ -12,12 +12,12 @@ BASE_SLEEP=1
 
 # Gemma
 MODEL="google/gemma-3n-e2b-it"
-GEMMA_BATCH_SIZE=10
+GEMMA_BATCH_SIZE=4
 GEMMA_MAX_NEW_TOKENS=512
 
 for seed in 12
 do
-  for p in {1..7}
+  for p in 8
   do
     ATTS=$(python -c 'from src.utils.helper import target_attribute as t; import sys; print(" ".join(t(int(sys.argv[1]))))' "$p")
     for att in $ATTS;

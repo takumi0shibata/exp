@@ -13,7 +13,8 @@ from models.ranknet_utils import (
     MultiAttrTrainingConfig,
     PairwiseRankingDataset,
     MultiAttrRankNet,
-    MultiAttrRankNetTrainer
+    MultiAttrRankNetTrainer,
+    MultiAttrMMoERankNet
 )
 from models.distribution_estimation import UnifiedConfig
 
@@ -115,12 +116,18 @@ def main(args, training_config: MultiAttrTrainingConfig, distribution_estimation
     # -----------------------------
     # Model Training
     # -----------------------------
-    model = MultiAttrRankNet(
-        embedding_dim=embeddings_essay1.shape[1],
-        num_attributes=len(TARGET_ATTRIBUTES),
-        hidden_dim=training_config.hidden_dim,
-        dropout=training_config.dropout_rate
-    )
+    if args.architecture == 'shared_bottom':
+        model = MultiAttrRankNet(
+            embedding_dim=embeddings_essay1.shape[1],
+            num_attributes=len(TARGET_ATTRIBUTES),
+            hidden_dim=training_config.hidden_dim,
+            dropout=training_config.dropout_rate
+        )
+    elif args.architecture == 'mmoe':
+        model = MultiAttrMMoERankNet(
+            embedding_dim=embeddings_essay1.shape[1],
+            num_attributes=len(TARGET_ATTRIBUTES),
+        )
     trainer = MultiAttrRankNetTrainer(model, training_config, sample_config=distribution_estimation_config, eval_data=eval_data)
     _, loss_history, qwk_history = trainer.train(dataloader)
 
@@ -137,11 +144,13 @@ if __name__ == "__main__":
     p.add_argument('--embedding_model', type=str, default='text-embedding-3-large')
     p.add_argument('--model', type=str, default='gpt-5-mini-2025-08-07')
     p.add_argument('--ot_calibration', action='store_true')
+    p.add_argument('--architecture', type=str, default='shared_bottom', choices=['shared_bottom', 'mmoe'])
     args = p.parse_args()
 
     training_config = MultiAttrTrainingConfig(
         hidden_dim=512,
         num_epochs=100,
+        dropout_rate=0.3,
         ot_calibration=args.ot_calibration,
     )
     if args.ot_calibration:

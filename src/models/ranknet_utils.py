@@ -6,6 +6,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.optim as optim
+import torch.nn.functional as F
 from torch.utils.data import Dataset, DataLoader
 from sklearn.metrics import cohen_kappa_score
 from scipy.stats import spearmanr
@@ -111,7 +112,6 @@ class RankNetTrainer:
             lr=config.learning_rate,
             weight_decay=config.weight_decay
         )
-        self.criterion = nn.BCELoss()
 
         # OT Calibration setup
         if self.config.ot_calibration:
@@ -157,8 +157,14 @@ class RankNetTrainer:
             
             self.optimizer.zero_grad()
             
-            probs = self.model.compare(emb1, emb2)
-            loss = self.criterion(probs, labels.unsqueeze(1))
+            probs = self.model.compare(emb1, emb2)              # (B, 1)
+            labels_u = labels.unsqueeze(1)                       # (B, 1)
+            mask = (~torch.isnan(labels_u)).float()              # (B, 1)
+            labels_filled = torch.nan_to_num(labels_u, nan=0.0)  # NaN -> 0（重みで無視）
+
+            loss = F.binary_cross_entropy(
+                probs, labels_filled, weight=mask, reduction='sum'
+            ) / mask.sum().clamp_min(1.0)
             
             loss.backward()
             self.optimizer.step()
@@ -235,21 +241,41 @@ class MultiAttrRankNet(nn.Module):
         super().__init__()
         self.num_attributes = num_attributes
         
+        # Architecture candidate 1
+        # # Shared embedding encoder
+        # self.shared_encoder = nn.Sequential(
+        #     nn.Linear(embedding_dim, hidden_dim),
+        #     nn.ReLU(),
+        #     nn.Dropout(p=dropout)
+        # )
         
+        # # Attribute-specific heads
+        # self.attribute_heads = nn.ModuleList([
+        #     nn.Sequential(
+        #         nn.LayerNorm(hidden_dim),
+        #         nn.Dropout(p=dropout),
+        #         nn.Linear(hidden_dim, hidden_dim // 2),
+        #         nn.ReLU(),
+        #         nn.Linear(hidden_dim // 2, 1)
+        #     )
+        #     for _ in range(num_attributes)
+        # ])
+
+        # Architecture candidate 2
         # Shared embedding encoder
         self.shared_encoder = nn.Sequential(
             nn.Linear(embedding_dim, hidden_dim),
             nn.ReLU(),
+            nn.Dropout(p=dropout),
+            nn.Linear(hidden_dim, hidden_dim // 2),
+            nn.ReLU(),
             nn.Dropout(p=dropout)
         )
-        
         # Attribute-specific heads
         self.attribute_heads = nn.ModuleList([
             nn.Sequential(
-                nn.LayerNorm(hidden_dim),
+                nn.LayerNorm(hidden_dim // 2),
                 nn.Dropout(p=dropout),
-                nn.Linear(hidden_dim, hidden_dim // 2),
-                nn.ReLU(),
                 nn.Linear(hidden_dim // 2, 1)
             )
             for _ in range(num_attributes)
@@ -310,7 +336,6 @@ class MultiAttrRankNetTrainer:
             lr=config.learning_rate,
             weight_decay=config.weight_decay
         )
-        self.criterion = nn.BCELoss()
 
         # OT Calibration setup
         if self.config.ot_calibration:
@@ -358,8 +383,13 @@ class MultiAttrRankNetTrainer:
             
             self.optimizer.zero_grad()
             
-            probs = self.model.compare(emb1, emb2)
-            loss = self.criterion(probs, labels)
+            probs = self.model.compare(emb1, emb2)              # (B, num_attributes)
+            mask = (~torch.isnan(labels)).float()               # (B, num_attributes)
+            labels_filled = torch.nan_to_num(labels, nan=0.0)   # NaN -> 0（重みで無視）
+
+            loss = F.binary_cross_entropy(
+                probs, labels_filled, weight=mask, reduction='sum'
+            ) / mask.sum().clamp_min(1.0)
             
             loss.backward()
             self.optimizer.step()
@@ -424,3 +454,141 @@ class MultiAttrRankNetTrainer:
             qwk_scores[attr] = qwk
         
         return qwk_scores
+
+
+class MMoE(nn.Module):
+    """
+    Multi-gate Mixture-of-Experts (MMoE)
+
+    - experts: K個の専門家ネットワーク（同一アーキテクチャ）
+    - gates:   タスクごとにK次元のゲーティング（softmax）を出力
+    入力:  x              (B, in_dim)
+    出力:  task_features  List[Tensor] (タスク数個の (B, out_dim))
+    """
+    def __init__(
+        self,
+        in_dim: int,
+        out_dim: int,
+        num_experts: int,
+        num_tasks: int,
+        dropout: float = 0.3,
+        activation: nn.Module = nn.ReLU()
+    ):
+        super().__init__()
+        self.num_experts = num_experts
+        self.num_tasks = num_tasks
+
+        # Expert: 最小限で shared encoder 相当（Linear -> Act -> Dropout）
+        self.experts = nn.ModuleList([
+            nn.Sequential(
+                nn.Linear(in_dim, out_dim),
+                activation,
+                nn.Dropout(p=dropout),
+                nn.Linear(out_dim, out_dim // 2),
+                activation,
+                nn.Dropout(p=dropout)
+            )
+            for _ in range(num_experts)
+        ])
+
+        # Task-wise gates: 各タスクごとに K（expert数）の重みを出す
+        self.gates = nn.ModuleList([
+            nn.Linear(in_dim, num_experts, bias=True)
+            for _ in range(num_tasks)
+        ])
+
+    def forward(self, x: torch.Tensor) -> list[torch.Tensor]:
+        """
+        Returns:
+            task_features: length=num_tasks の list。各要素は (B, out_dim)
+        """
+        # Expertの出力をまとめる: (B, K, out_dim)
+        expert_outputs = torch.stack([expert(x) for expert in self.experts], dim=1)  # (B, K, D)
+
+        task_features = []
+        for gate in self.gates:
+            # (B, K)
+            gate_logits = gate(x)
+            gate_weights = F.softmax(gate_logits, dim=-1)
+            # 重み付き和: (B, 1, K) @ (B, K, D) -> (B, 1, D) -> (B, D)
+            mixed = torch.bmm(gate_weights.unsqueeze(1), expert_outputs).squeeze(1)
+            task_features.append(mixed)
+
+        return task_features
+
+
+class MultiAttrMMoERankNet(nn.Module):
+    """
+    MMoEベースの multi-attribute Bradley-Terry スコアリングモデル。
+    既存の MultiAttrRankNet と同一インターフェース・同一入出力形状。
+
+    Args:
+        embedding_dim: 入力埋め込み次元
+        num_attributes: タスク数（属性数）
+        hidden_dim: MMoEの expert 出力次元（そのまま各タワー/ヘッドの入力次元）
+        dropout: Dropout率（experts と heads に適用）
+        num_experts: Expert の個数
+        activation: Expert に使う活性化関数（デフォルト ReLU）
+    """
+    def __init__(
+        self,
+        embedding_dim: int,
+        num_attributes: int,
+        hidden_dim: int = 512,
+        dropout: float = 0.3,
+        num_experts: int = 3,
+        activation: nn.Module = nn.ReLU()
+    ):
+        super().__init__()
+        self.num_attributes = num_attributes
+
+        # === MMoE (shared encoder の置き換え) ===
+        self.mmoe = MMoE(
+            in_dim=embedding_dim,
+            out_dim=hidden_dim,
+            num_experts=num_experts,
+            num_tasks=num_attributes,
+            dropout=dropout,
+            activation=activation
+        )
+
+        # === Attribute-specific heads（既存と互換）===
+        self.attribute_heads = nn.ModuleList([
+            nn.Sequential(
+                nn.LayerNorm(hidden_dim // 2),
+                # nn.Dropout(p=dropout),
+                nn.Linear(hidden_dim // 2, 1),
+            )
+            for _ in range(num_attributes)
+        ])
+
+    def forward(self, essay_embedding: torch.Tensor) -> torch.Tensor:
+        """
+        Args:
+            essay_embedding: (B, embedding_dim)
+        Returns:
+            scores: (B, num_attributes)
+        """
+        # タスクごとの特徴 (num_attributes 個の (B, hidden_dim))
+        task_features = self.mmoe(essay_embedding)
+
+        # 各タスクを独立ヘッドでスコア化
+        scores = []
+        for feat, head in zip(task_features, self.attribute_heads):
+            score = head(feat)  # (B, 1)
+            scores.append(score)
+
+        return torch.cat(scores, dim=1)  # (B, num_attributes)
+
+    def compare(self, essay1_embedding: torch.Tensor, essay2_embedding: torch.Tensor) -> torch.Tensor:
+        """
+        Bradley-Terry 確率 P(item1 > item2) を属性ごとに出力。
+        Args:
+            essay1_embedding: (B, embedding_dim)
+            essay2_embedding: (B, embedding_dim)
+        Returns:
+            probs: (B, num_attributes)
+        """
+        score1 = self.forward(essay1_embedding)  # (B, num_attributes)
+        score2 = self.forward(essay2_embedding)  # (B, num_attributes)
+        return torch.sigmoid(score1 - score2)    # (B, num_attributes)
